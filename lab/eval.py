@@ -22,7 +22,7 @@ import csv
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 from datetime import datetime
-from rag_answer import rag_answer
+from rag_answer import rag_answer, call_llm
 
 # =============================================================================
 # CẤU HÌNH
@@ -88,12 +88,30 @@ def score_faithfulness(
 
     Trả về dict với: score (1-5) và notes (lý do)
     """
-    # TODO Sprint 4: Implement scoring
-    # Tạm thời trả về None (yêu cầu chấm thủ công)
-    return {
-        "score": None,
-        "notes": "TODO: Chấm thủ công hoặc implement LLM-as-Judge",
-    }
+    context_text = "\n\n".join(
+        f"[{i+1}] {c.get('text', '')}"
+        for i, c in enumerate(chunks_used)
+    )
+    prompt = (
+        f"Given these retrieved chunks:\n{context_text}\n\n"
+        f"And this answer:\n{answer}\n\n"
+        "Rate the faithfulness on a scale of 1-5.\n"
+        "5 = completely grounded in the provided context, no invented information.\n"
+        "1 = answer contains significant information NOT in the context.\n"
+        'Output ONLY valid JSON: {"score": <int 1-5>, "reason": "<string>"}'
+    )
+    try:
+        raw = call_llm(prompt)
+        # strip markdown code block if present
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        parsed = json.loads(raw.strip())
+        return {"score": int(parsed["score"]), "notes": parsed.get("reason", "")}
+    except Exception as e:
+        return {"score": None, "notes": f"LLM-as-Judge error: {e}"}
 
 
 def score_answer_relevance(
@@ -113,10 +131,25 @@ def score_answer_relevance(
 
     TODO Sprint 4: Implement tương tự score_faithfulness
     """
-    return {
-        "score": None,
-        "notes": "TODO: Implement score_answer_relevance",
-    }
+    prompt = (
+        f"Question: {query}\n\n"
+        f"Answer: {answer}\n\n"
+        "Rate how well this answer addresses the question on a scale of 1-5.\n"
+        "5 = directly and fully answers the question.\n"
+        "1 = does not answer the question at all.\n"
+        'Output ONLY valid JSON: {"score": <int 1-5>, "reason": "<string>"}'
+    )
+    try:
+        raw = call_llm(prompt)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        parsed = json.loads(raw.strip())
+        return {"score": int(parsed["score"]), "notes": parsed.get("reason", "")}
+    except Exception as e:
+        return {"score": None, "notes": f"LLM-as-Judge error: {e}"}
 
 
 def score_context_recall(
@@ -198,10 +231,33 @@ def score_completeness(
          Rate completeness 1-5. Are all key points covered?
          Output: {'score': int, 'missing_points': [str]}"
     """
-    return {
-        "score": None,
-        "notes": "TODO: Implement score_completeness (so sánh với expected_answer)",
-    }
+    if not expected_answer:
+        return {"score": None, "notes": "No expected answer provided"}
+    prompt = (
+        f"Question: {query}\n\n"
+        f"Expected answer (ground truth): {expected_answer}\n\n"
+        f"Model answer: {answer}\n\n"
+        "Compare the model answer against the expected answer.\n"
+        "Rate completeness on a scale of 1-5.\n"
+        "5 = all key points from the expected answer are covered.\n"
+        "1 = most key points are missing.\n"
+        'Output ONLY valid JSON: {"score": <int 1-5>, "missing_points": [<str>], "reason": "<string>"}'
+    )
+    try:
+        raw = call_llm(prompt)
+        raw = raw.strip()
+        if raw.startswith("```"):
+            raw = "\n".join(raw.split("\n")[1:])
+        if raw.endswith("```"):
+            raw = "\n".join(raw.split("\n")[:-1])
+        parsed = json.loads(raw.strip())
+        missing = parsed.get("missing_points", [])
+        notes = parsed.get("reason", "")
+        if missing:
+            notes = f"{notes} | Missing: {missing}"
+        return {"score": int(parsed["score"]), "notes": notes}
+    except Exception as e:
+        return {"score": None, "notes": f"LLM-as-Judge error: {e}"}
 
 
 # =============================================================================
@@ -486,25 +542,29 @@ if __name__ == "__main__":
         print("Pipeline chưa implement. Hoàn thành Sprint 2 trước.")
         baseline_results = []
 
-    # --- Chạy Variant (sau khi Sprint 3 hoàn thành) ---
-    # TODO Sprint 4: Uncomment sau khi implement variant trong rag_answer.py
-    # print("\n--- Chạy Variant ---")
-    # variant_results = run_scorecard(
-    #     config=VARIANT_CONFIG,
-    #     test_questions=test_questions,
-    #     verbose=True,
-    # )
-    # variant_md = generate_scorecard_summary(variant_results, VARIANT_CONFIG["label"])
-    # (RESULTS_DIR / "scorecard_variant.md").write_text(variant_md, encoding="utf-8")
+    # --- Chạy Variant ---
+    print("\n--- Chạy Variant ---")
+    try:
+        variant_results = run_scorecard(
+            config=VARIANT_CONFIG,
+            test_questions=test_questions,
+            verbose=True,
+        )
+        variant_md = generate_scorecard_summary(variant_results, VARIANT_CONFIG["label"])
+        variant_path = RESULTS_DIR / "scorecard_variant.md"
+        variant_path.write_text(variant_md, encoding="utf-8")
+        print(f"\nScorecard lưu tại: {variant_path}")
+    except NotImplementedError:
+        print("Pipeline chưa implement. Hoàn thành Sprint 3 trước.")
+        variant_results = []
 
     # --- A/B Comparison ---
-    # TODO Sprint 4: Uncomment sau khi có cả baseline và variant
-    # if baseline_results and variant_results:
-    #     compare_ab(
-    #         baseline_results,
-    #         variant_results,
-    #         output_csv="ab_comparison.csv"
-    #     )
+    if baseline_results and variant_results:
+        compare_ab(
+            baseline_results,
+            variant_results,
+            output_csv="ab_comparison.csv"
+        )
 
     print("\n\nViệc cần làm Sprint 4:")
     print("  1. Hoàn thành Sprint 2 + 3 trước")
